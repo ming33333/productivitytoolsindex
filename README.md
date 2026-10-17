@@ -58,3 +58,4 @@ The copy has no secrets and no Firebase project. Run setup before you deploy it.
 Do not commit `.env` or `functions/.env`. Those files hold the Stripe secret key.
 
 The long version of deploy, DNS, and webhook setup is in [SETUP.md](SETUP.md).
+# productivitytoolsindex
