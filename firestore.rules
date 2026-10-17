@@ -1,0 +1,187 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null && request.auth.token.email != null;
+    }
+
+    function email() {
+      return request.auth.token.email.lower();
+    }
+
+    function isOwner(userId) {
+      return signedIn() && email() == userId;
+    }
+
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(email()));
+    }
+
+    // Profile. subscriptionStatus is written only by Cloud Functions (admin SDK).
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId)
+        && !('subscriptionStatus' in request.resource.data);
+      allow update: if (isOwner(userId) || isAdmin())
+        && (
+          !('subscriptionStatus' in request.resource.data)
+          || (
+            'subscriptionStatus' in resource.data
+            && request.resource.data.subscriptionStatus == resource.data.subscriptionStatus
+          )
+        )
+        && (
+          isAdmin()
+          || !('freeDayUsed' in resource.data)
+          || resource.data.freeDayUsed != true
+          || request.resource.data.freeDayUsed == true
+        );
+      allow delete: if false;
+
+      match /notes/{noteId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+    }
+
+    // Public directory listings. authorEmail must be the signed-in email.
+    match /entries/{entryId} {
+      allow read: if true;
+      allow create: if signedIn()
+        && request.resource.data.authorEmail == email();
+      allow update, delete: if signedIn()
+        && resource.data.authorEmail == email();
+    }
+
+    // Site stories. Visitors read published stories. Admins write them.
+    match /posts/{postId} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow create: if isAdmin()
+        && request.resource.data.authorEmail == email();
+      allow update, delete: if isAdmin();
+    }
+
+    // Up to 4 front-page ads per day. A subscriber's own booking is one free day. An admin can book several apps from one account.
+    function slotKey(value) {
+      return value.replace('\\.', '_').replace('@', '_');
+    }
+
+    function hasSlotMap(data) {
+      return data.keys().hasAny(['slots']) && data.slots is map;
+    }
+
+    match /ads/{day} {
+      allow read: if true;
+      allow create: if signedIn()
+        && request.resource.data.date == day
+        && request.resource.data.slots is map
+        && request.resource.data.slots.size() >= 1
+        && request.resource.data.slots.size() <= 4
+        && (
+          isAdmin()
+          || (
+            request.resource.data.slots.size() == 1
+            && slotKey(email()) in request.resource.data.slots
+            && request.resource.data.slots[slotKey(email())].authorEmail == email()
+            && request.resource.data.slots[slotKey(email())].kind == "free"
+            && request.resource.data.slots[slotKey(email())].name is string
+            && request.resource.data.slots[slotKey(email())].entryId is string
+          )
+        );
+      allow update: if signedIn()
+        && request.resource.data.date == day
+        && request.resource.data.keys().hasAny(['slots'])
+        && request.resource.data.slots is map
+        && request.resource.data.slots.size() >= 1
+        && request.resource.data.slots.size() <= 4
+        && (
+          isAdmin()
+          || (
+            hasSlotMap(resource.data)
+            && request.resource.data.slots.size() == resource.data.slots.size() + 1
+            && slotKey(email()) in request.resource.data.slots
+            && !(slotKey(email()) in resource.data.slots)
+            && request.resource.data.slots[slotKey(email())].authorEmail == email()
+            && request.resource.data.slots[slotKey(email())].kind == "free"
+            && request.resource.data.slots[slotKey(email())].name is string
+            && request.resource.data.slots[slotKey(email())].entryId is string
+          )
+          || (
+            !hasSlotMap(resource.data)
+            && resource.data.keys().hasAll(['authorEmail', 'name', 'entryId'])
+            && request.resource.data.slots.size() == 2
+            && slotKey(resource.data.authorEmail) in request.resource.data.slots
+            && request.resource.data.slots[slotKey(resource.data.authorEmail)].authorEmail == resource.data.authorEmail
+            && request.resource.data.slots[slotKey(resource.data.authorEmail)].name == resource.data.name
+            && request.resource.data.slots[slotKey(resource.data.authorEmail)].entryId == resource.data.entryId
+            && slotKey(email()) != slotKey(resource.data.authorEmail)
+            && slotKey(email()) in request.resource.data.slots
+            && request.resource.data.slots[slotKey(email())].authorEmail == email()
+            && request.resource.data.slots[slotKey(email())].kind == "free"
+            && request.resource.data.slots[slotKey(email())].name is string
+            && request.resource.data.slots[slotKey(email())].entryId is string
+          )
+          || (
+            hasSlotMap(resource.data)
+            && request.resource.data.slots.size() == resource.data.slots.size() - 1
+            && request.resource.data.slots.diff(resource.data.slots).addedKeys().size() == 0
+            && request.resource.data.slots.diff(resource.data.slots).changedKeys().size() == 0
+            && request.resource.data.slots.diff(resource.data.slots).removedKeys().hasOnly([slotKey(email())])
+          )
+        );
+      allow delete: if isAdmin() || (
+        signedIn()
+        && (
+          (
+            !hasSlotMap(resource.data)
+            && resource.data.authorEmail == email()
+          )
+          || (
+            hasSlotMap(resource.data)
+            && resource.data.slots.size() == 1
+            && resource.data.slots.values()[0].authorEmail == email()
+          )
+        )
+      );
+    }
+
+    // Newsletter list. One document per email. creditUsed stays true after the free day is claimed.
+    match /newsletter/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if (isOwner(userId) || isAdmin())
+        && request.resource.data.email == userId
+        && (request.resource.data.subscribed == true || request.resource.data.subscribed == false);
+      allow update: if (isOwner(userId) || isAdmin())
+        && request.resource.data.email == userId
+        && (request.resource.data.subscribed == true || request.resource.data.subscribed == false)
+        && (
+          isAdmin()
+          || !('creditUsed' in resource.data)
+          || resource.data.creditUsed != true
+          || request.resource.data.creditUsed == true
+        );
+      allow delete: if false;
+    }
+
+    match /freeAds/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if (isOwner(userId) || isAdmin())
+        && request.resource.data.email == userId
+        && request.resource.data.date is string
+        && request.resource.data.entryId is string
+        && request.resource.data.name is string;
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // Admin list. A person can check their own record. Admins manage the rest.
+    match /admins/{adminId} {
+      allow get: if signedIn() && (adminId == email() || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isAdmin() && request.resource.data.email == adminId;
+      allow update, delete: if isAdmin();
+    }
+  }
+}
